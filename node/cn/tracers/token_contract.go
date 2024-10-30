@@ -1,11 +1,12 @@
 package tracers
 
 import (
+	"strings"
+
 	"github.com/kaiachain/kaia/accounts/abi"
 	"github.com/kaiachain/kaia/api"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
-	"strings"
 )
 
 var (
