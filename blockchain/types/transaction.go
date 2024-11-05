@@ -569,6 +569,12 @@ func (tx *Transaction) Execute(vm VM, stateDB StateDB, currentBlockNumber uint64
 	return tx.data.Execute(sender, vm, stateDB, currentBlockNumber, gas, value)
 }
 
+func (tx *Transaction) SetCheckNonce(check bool) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.checkNonce = check
+}
+
 // AsMessageWithAccountKeyPicker returns the transaction as a blockchain.Message.
 //
 // AsMessageWithAccountKeyPicker requires a signer to derive the sender and AccountKeyPicker.
