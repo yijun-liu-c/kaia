@@ -627,7 +627,6 @@ func (api *CommonAPI) traceBlock(ctx context.Context, block *types.Block, config
 	if block.NumberU64() == 0 {
 		return nil, errors.New("genesis is not traceable")
 	}
-
 	// Create the parent state database
 	parent, err := api.blockByNumberAndHash(ctx, rpc.BlockNumber(block.NumberU64()-1), block.ParentHash())
 	if err != nil {
@@ -644,11 +643,14 @@ func (api *CommonAPI) traceBlock(ctx context.Context, block *types.Block, config
 	}
 	defer release()
 
-	// Execute all the transactions contained within the block sequentially
+	// Execute all the transaction contained within the block concurrently
 	var (
 		signer  = types.MakeSigner(api.backend.ChainConfig(), block.Number())
 		txs     = block.Transactions()
 		results = make([]*txTraceResult, len(txs))
+
+		pend = new(sync.WaitGroup)
+		jobs = make(chan *txTraceTask, len(txs))
 	)
 	threads := 1
 	if threads > len(txs) {
@@ -659,13 +661,34 @@ func (api *CommonAPI) traceBlock(ctx context.Context, block *types.Block, config
 		go func() {
 			defer pend.Done()
 
+			// Fetch and execute the next transaction trace tasks
+			for task := range jobs {
+				msg, err := txs[task.index].AsMessageWithAccountKeyPicker(signer, task.statedb, block.NumberU64())
+				if err != nil {
+					logger.Warn("Tracing failed", "tx idx", task.index, "block", block.NumberU64(), "err", err)
+					results[task.index] = &txTraceResult{TxHash: txs[task.index].Hash(), Error: err.Error()}
+					continue
+				}
+
+				txCtx := blockchain.NewEVMTxContext(msg, block.Header(), api.backend.ChainConfig())
+				blockCtx := blockchain.NewEVMBlockContext(block.Header(), newChainContext(ctx, api.backend), nil)
+				res, err := api.traceTx(ctx, msg, blockCtx, txCtx, task.statedb, config)
+				if err != nil {
+					results[task.index] = &txTraceResult{TxHash: txs[task.index].Hash(), Error: err.Error()}
+					continue
+				}
+				results[task.index] = &txTraceResult{TxHash: txs[task.index].Hash(), Result: res}
+			}
+		}()
+	}
+	// Feed the transactions into the tracers and return
 	var failed error
 	for i, tx := range txs {
-		// Create a new state copy for each transaction
-		statedbCopy := statedb.Copy()
+		// Send the trace task over for execution
+		jobs <- &txTraceTask{statedb: statedb.Copy(), index: i}
 
-		// Generate the next state snapshot without tracing
-		msg, err := tx.AsMessageWithAccountKeyPicker(signer, statedbCopy, block.NumberU64())
+		// Generate the next state snapshot fast without tracing
+		msg, err := tx.AsMessageWithAccountKeyPicker(signer, statedb, block.NumberU64())
 		if err != nil {
 			logger.Warn("Tracing failed", "hash", tx.Hash(), "block", block.NumberU64(), "err", err)
 			failed = err
@@ -674,23 +697,16 @@ func (api *CommonAPI) traceBlock(ctx context.Context, block *types.Block, config
 
 		txCtx := blockchain.NewEVMTxContext(msg, block.Header(), api.backend.ChainConfig())
 		blockCtx := blockchain.NewEVMBlockContext(block.Header(), newChainContext(ctx, api.backend), nil)
-		vmenv := vm.NewEVM(blockCtx, txCtx, statedbCopy, api.backend.ChainConfig(), &vm.Config{})
+		vmenv := vm.NewEVM(blockCtx, txCtx, statedb, api.backend.ChainConfig(), &vm.Config{})
 		if _, err = blockchain.ApplyMessage(vmenv, msg); err != nil {
 			failed = err
 			break
 		}
-
 		// Finalize the state so any modifications are written to the trie
-		statedbCopy.Finalise(true, true)
-
-		// Trace the transaction
-		res, err := api.traceTx(ctx, msg, blockCtx, txCtx, statedbCopy, config)
-		if err != nil {
-			results[i] = &txTraceResult{TxHash: tx.Hash(), Error: err.Error()}
-		} else {
-			results[i] = &txTraceResult{TxHash: tx.Hash(), Result: res}
-		}
+		statedb.Finalise(true, true)
 	}
+	close(jobs)
+	pend.Wait()
 
 	// If execution failed in between, abort
 	if failed != nil {
