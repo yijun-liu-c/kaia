@@ -201,6 +201,7 @@ type TraceConfig struct {
 	Timeout       *string
 	LoggerTimeout *string
 	Reexec        *uint64
+	TracerConfig  json.RawMessage
 }
 
 // StdTraceConfig holds extra parameters to standard-json trace functions.
@@ -937,6 +938,7 @@ func (api *CommonAPI) traceTx(ctx context.Context, message blockchain.Message, b
 		tracer vm.Tracer
 		err    error
 	)
+
 	switch {
 	case config != nil && config.Tracer != nil:
 		// Define a meaningful timeout of a single transaction trace
@@ -949,6 +951,11 @@ func (api *CommonAPI) traceTx(ctx context.Context, message blockchain.Message, b
 
 		if *config.Tracer == "fastCallTracer" || *config.Tracer == "callTracer" {
 			tracer = vm.NewCallTracer()
+		} else if *config.Tracer == "prestateTracer" {
+			tracer, err = vm.NewPrestateTracer(config.TracerConfig)
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			// Construct the JavaScript tracer to execute with
 			if tracer, err = New(*config.Tracer, new(Context), api.unsafeTrace); err != nil {
@@ -964,6 +971,8 @@ func (api *CommonAPI) traceTx(ctx context.Context, message blockchain.Message, b
 				case *Tracer:
 					t.Stop(errors.New("execution timeout"))
 				case *vm.InternalTxTracer:
+					t.Stop(errors.New("execution timeout"))
+				case *vm.PrestateTracer:
 					t.Stop(errors.New("execution timeout"))
 				case *vm.CallTracer:
 					t.Stop(errors.New("execution timeout"))
@@ -1012,6 +1021,8 @@ func (api *CommonAPI) traceTx(ctx context.Context, message blockchain.Message, b
 	case *vm.InternalTxTracer:
 		return tracer.GetResult()
 	case *vm.CallTracer:
+		return tracer.GetResult()
+	case *vm.PrestateTracer:
 		return tracer.GetResult()
 
 	default:
