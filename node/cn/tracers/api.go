@@ -653,7 +653,7 @@ func (api *CommonAPI) traceBlock(ctx context.Context, block *types.Block, config
 		pend = new(sync.WaitGroup)
 		jobs = make(chan *txTraceTask, len(txs))
 	)
-	threads := 1
+	threads := 5
 	if threads > len(txs) {
 		threads = len(txs)
 	}
@@ -1079,7 +1079,7 @@ func (api *CommonAPI) traceBlockToken(ctx context.Context, block *types.Block, c
 		pend = new(sync.WaitGroup)
 		jobs = make(chan *txTraceTask, len(txs))
 	)
-	threads := 1
+	threads := 5
 	if threads > len(txs) {
 		threads = len(txs)
 	}
@@ -1146,6 +1146,21 @@ func (api *CommonAPI) traceBlockToken(ctx context.Context, block *types.Block, c
 type TokenBalanceTracerResult struct {
 	Contracts    map[common.Address][]string       `json:"contracts"`
 	TopContracts map[common.Address]common.Address `json:"topContracts"`
+}
+
+type BalanceResult struct {
+	Balance map[common.Address]map[common.Address]*big.Int `json:"balance"`
+	Token   []*TokenInfo                                   `json:"token"`
+}
+
+type TokenInfo struct {
+	TokenAddress   common.Address `json:"contract_address"`
+	Name           string         `json:"name"`
+	Symbol         string         `json:"symbol"`
+	Decimals       *big.Int       `json:"decimals"`
+	HasDecimals    bool           `json:"has_decimals"`
+	TotalSupply    *big.Int       `json:"total_supply"`
+	HasTotalSupply bool           `json:"has_total_supply"`
 }
 
 func (api *CommonAPI) traceTxToken(ctx context.Context, message blockchain.Message, blockCtx vm.BlockContext, txCtx vm.TxContext, statedb *state.StateDB, config *TraceConfig) (interface{}, error) {
@@ -1340,5 +1355,50 @@ func (api *CommonAPI) traceTxToken(ctx context.Context, message blockchain.Messa
 		}
 	}
 
-	return balanceResult, nil
+	// token info
+	data, err = api.tokenContract.abi.Pack("tokenInfo", tokens)
+	if err != nil {
+		return nil, fmt.Errorf("pack tokenInfo failed: %w", err)
+	}
+	// get wallet balance
+	rawTokenInfo, _, err = vmenv.StaticCall(vm.AccountRef(api.tokenContract.caller), api.tokenContract.address, data, 5_000_000_000_000)
+	if err != nil {
+		return nil, fmt.Errorf("check token info failed: %w", err)
+	}
+	contractResult, err = api.tokenContract.abi.Unpack("tokenInfo", rawTokenInfo)
+	if err != nil {
+		return nil, fmt.Errorf("call balance data failed: %w", err)
+	}
+	name := make([]string, 0)
+	symbol := make([]string, 0)
+	decimal := make([]*big.Int, 0)
+	hasDecimal := make([]bool, 0)
+	totalSupply := make([]*big.Int, 0)
+	hasTotalSupply := make([]bool, 0)
+	abi.ConvertType(contractResult[0], &name)
+	abi.ConvertType(contractResult[1], &symbol)
+	abi.ConvertType(contractResult[2], &decimal)
+	abi.ConvertType(contractResult[3], &hasDecimal)
+	abi.ConvertType(contractResult[4], &totalSupply)
+	abi.ConvertType(contractResult[5], &hasTotalSupply)
+
+	tokenInfos := make([]*TokenInfo, 0)
+	for i, tokenAddress := range tokens {
+		tokenInfos = append(tokenInfos, &TokenInfo{
+			TokenAddress:   tokenAddress,
+			Name:           name[i],
+			Symbol:         symbol[i],
+			Decimals:       decimal[i],
+			HasDecimals:    hasDecimal[i],
+			TotalSupply:    totalSupply[i],
+			HasTotalSupply: hasTotalSupply[i],
+		})
+	}
+
+	br := BalanceResult{
+		Balance: balanceResult,
+		Token:   tokenInfos,
+	}
+
+	return br, nil
 }
